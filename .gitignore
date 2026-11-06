@@ -68,3 +68,7 @@ coverage.xml
 
 .vercel
 .env*
+
+# Downloaded datasets and local training runs
+/data/
+/runs/

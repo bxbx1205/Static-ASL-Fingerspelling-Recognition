@@ -1,4 +1,17 @@
-"""Run locally after downloading the trained model from Kaggle. Q quits; R resets."""
+"""Live webcam demo for static ASL fingerspelling recognition.
+
+Pipeline per frame:
+    1. MediaPipe Hands finds the hand and its 21 landmarks.
+    2. hand_crop() cuts a square around the landmarks (plus a margin).
+    3. The crop is resized with padding to the model's input size and classified
+       by the trained CNN (best_model.keras).
+    4. TemporalVote accepts a letter only when it wins enough recent frames.
+
+Run locally after downloading the trained model from Kaggle:
+    python webcam.py --results model_results
+
+Keys: Q quits, R resets the vote, S saves the current crop (with --capture-label).
+"""
 import argparse
 import csv
 import json
@@ -14,7 +27,18 @@ from temporal_vote import TemporalVote
 
 
 def hand_crop(rgb, landmarks, margin=0.2):
+    """Cut a square crop centred on the hand.
+
+    The landmark bounding box is enlarged by `margin` on every side and made
+    square. Parts of the square that fall outside the frame are left black, so
+    the hand keeps its position and scale inside the crop.
+
+    Returns (crop, box): the RGB crop, and the in-frame box (x0, y0, x1, y1)
+    used to draw the preview rectangle. Returns (None, None) if the square lies
+    entirely outside the frame.
+    """
     h, w = rgb.shape[:2]
+    # Landmarks are normalised to [0, 1]; convert them to pixel coordinates.
     xs = np.array([p.x*w for p in landmarks.landmark])
     ys = np.array([p.y*h for p in landmarks.landmark])
     x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
@@ -23,6 +47,7 @@ def hand_crop(rgb, landmarks, margin=0.2):
     left, top = int(cx-side/2), int(cy-side/2)
     right, bottom = left+side, top+side
     crop = np.zeros((side, side, 3), dtype=np.uint8)
+    # Clip the square to the frame and copy only the visible part into the crop.
     sx0, sy0, sx1, sy1 = max(0,left), max(0,top), min(w,right), min(h,bottom)
     if sx1 <= sx0 or sy1 <= sy0:
         return None, None
@@ -31,6 +56,7 @@ def hand_crop(rgb, landmarks, margin=0.2):
 
 
 def main():
+    """Open the camera, classify each frame, and log per-frame timings to CSV."""
     parser = argparse.ArgumentParser()
     parser.add_argument('--results', type=Path, required=True,
                         help='Directory containing best_model.keras and inference_config.json')
@@ -39,6 +65,9 @@ def main():
     parser.add_argument('--capture-label', help='Optional correct label for saved volunteer crops')
     parser.add_argument('--capture-dir', type=Path, default=Path('volunteer_test'))
     args = parser.parse_args()
+
+    # inference_config.json is written by the training notebook and holds the
+    # class order, input size and voting settings that match the saved model.
     config = json.loads((args.results/'inference_config.json').read_text())
     names = config['classes']
     if args.capture_label and args.capture_label not in names:
@@ -47,6 +76,7 @@ def main():
     threshold = config['score_threshold']
     voter = TemporalVote(config['vote_window'], config['required_votes'])
     model = tf.keras.models.load_model(args.results/'best_model.keras', compile=False)
+    # Fail early if the model and its config were mixed up between runs.
     if tuple(model.input_shape[1:3]) != (size, size):
         raise ValueError('Model input size does not match inference_config.json')
     if model.output_shape[-1] != len(names):
@@ -56,6 +86,7 @@ def main():
     def predict(batch):
         return model(batch, training=False)
 
+    # Warm-up call so graph tracing does not delay the first camera frame.
     predict(tf.zeros([1,size,size,3], dtype=tf.float32)).numpy()
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
@@ -86,11 +117,14 @@ def main():
                     crop, box = hand_crop(rgb, detection.multi_hand_landmarks[0],
                                           config['hand_crop_margin'])
                     if crop is not None:
+                        # Same resize as training. Pixels stay in [0, 255]; the
+                        # model rescales internally, so do not divide by 255 here.
                         image = tf.image.resize_with_pad(crop, size, size)
                         image = tf.cast(tf.clip_by_value(image,0,255),tf.uint8)
                         scores = predict(tf.cast(image[None], tf.float32)).numpy()[0]
                         idx = int(scores.argmax())
                         raw_label, score = names[idx], float(scores[idx])
+                        # Low-score frames count as "no prediction" and reset the vote.
                         stable = voter.update(raw_label if score >= threshold else None)
                 if crop is None:
                     voter.clear()
