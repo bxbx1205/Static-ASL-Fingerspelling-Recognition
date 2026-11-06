@@ -375,3 +375,4 @@ public datasets; calibrate confidence so unknown gestures are rejected.
 - G. Casiez, N. Roussel, D. Vogel, "1€ filter," CHI 2012.
 - Keras MobileNet models: <https://keras.io/api/applications/mobilenet/>
 - TensorFlow transfer learning guide: <https://www.tensorflow.org/tutorials/images/transfer_learning>
+-
